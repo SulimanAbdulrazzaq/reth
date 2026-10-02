@@ -1,0 +1,29 @@
+name: s15-perf
+on: push
+jobs:
+  perf:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 8
+      - name: revisions
+        run: git log -4 --format='%H %T %s'
+      - run: .github/scripts/install_llvm.sh ubuntu
+      - uses: dtolnay/rust-toolchain@stable
+      - name: copy probe patch
+        run: cp s15-perf.patch /tmp/s15-perf.patch
+      - name: alternate base and fix (release, ignored probe test)
+        run: |
+          BASE=42623672abf0588abe62c6dd373a41246cea8c87
+          FIX=d369875d269a5e24cdd0d3f47d63a1187a7b8ea1
+          for round in 1 2 3 4 5; do
+            for rev in $BASE $FIX; do
+              git checkout -q --detach $rev
+              git apply /tmp/s15-perf.patch
+              echo "round=$round rev=$rev ($( [ $rev = $BASE ] && echo base || echo fix ))"
+              cargo test --release -p reth-transaction-pool --locked --lib -- --ignored s15_perf_best_iteration --nocapture 2>&1 | grep -E "S15PERF|error|panicked" || true
+              git checkout -q -- .
+            done
+          done

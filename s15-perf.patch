@@ -1,0 +1,56 @@
+diff --git a/crates/transaction-pool/src/pool/best.rs b/crates/transaction-pool/src/pool/best.rs
+index 585f5b2..9e6841a 100644
+--- a/crates/transaction-pool/src/pool/best.rs
++++ b/crates/transaction-pool/src/pool/best.rs
+@@ -1264,4 +1264,51 @@ mod tests {
+         );
+         assert_eq!(included_txs, 2, "expected one 5-blob tx and one 1-blob tx in the block");
+     }
++
++    /// Timing probe used to measure the iteration cost, not part of the change.
++    #[test]
++    #[ignore]
++    fn s15_perf_best_iteration() {
++        use alloy_primitives::Address;
++        use std::time::Instant;
++
++        let mut pool = PendingPool::new(MockOrdering::default());
++        let mut f = MockTransactionFactory::default();
++
++        let senders = 4_000u64;
++        let per_sender = 3u64;
++        let base = MockTransaction::eip1559();
++        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
++        for _ in 0..senders {
++            let sender = Address::random();
++            for nonce in 0..per_sender {
++                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
++                let fee = 1 + (seed >> 40) as u128 % 1_000;
++                let tx = base
++                    .clone()
++                    .rng_hash()
++                    .with_sender(sender)
++                    .with_nonce(nonce)
++                    .with_priority_fee(fee)
++                    .with_max_fee(fee);
++                pool.add_transaction(Arc::new(f.validated(tx)), 0);
++            }
++        }
++        let total = (senders * per_sender) as usize;
++
++        let mut samples = Vec::new();
++        for _ in 0..40 {
++            let start = Instant::now();
++            let count = pool.best().count();
++            samples.push(start.elapsed().as_secs_f64() * 1e3);
++            assert_eq!(count, total);
++        }
++        samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
++        println!(
++            "S15PERF txs={total} median_ms={:.3} min_ms={:.3} ns_per_tx_median={:.1}",
++            samples[samples.len() / 2],
++            samples[0],
++            samples[samples.len() / 2] * 1e6 / total as f64
++        );
++    }
+ }
