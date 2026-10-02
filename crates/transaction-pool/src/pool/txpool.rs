@@ -5624,4 +5624,111 @@ mod tests {
         assert_eq!(t2.id().nonce, 2, "expected nonce 2, got {}", t2.id().nonce);
         assert_eq!(t3.id().nonce, 3, "expected nonce 3, got {}", t3.id().nonce);
     }
+
+    /// Reorg scenario: a live `BestTransactions` iterator is opened after nonce 0 was mined, then
+    /// the reorg puts nonce 0 back into the pool. Nonce 0 must be yielded before nonce 1, even
+    /// though nonce 1 pays the higher tip.
+    #[test]
+    fn best_transactions_nonce_order_on_reorg_reinsert() {
+        let mut f = MockTransactionFactory::default();
+        let mut pool = TxPool::new(MockOrdering::default(), Default::default());
+
+        let sender = Address::random();
+        let balance = U256::from(10_000_000);
+
+        // tx0 is cheaper than tx1, so a tip-only ordering would yield tx1 first
+        let tx0 = MockTransaction::eip1559()
+            .with_sender(sender)
+            .with_gas_price(100)
+            .with_gas_limit(21_000);
+        let tx1 = tx0.next().with_gas_price(200);
+
+        let v0 = f.validated(tx0);
+        let v1 = f.validated(tx1);
+        let hash0 = *v0.hash();
+        let sender_id = f.ids.sender_id(&sender).unwrap();
+
+        pool.add_transaction(v0.clone(), balance, 0, None).unwrap();
+        pool.add_transaction(v1, balance, 0, None).unwrap();
+
+        let mut block_info = pool.block_info();
+        block_info.pending_basefee = 0;
+
+        // chain A mines nonce 0
+        let mut mined = FxHashMap::default();
+        mined.insert(sender_id, SenderInfo { state_nonce: 1, balance });
+        pool.on_canonical_state_change(block_info, vec![hash0], mined, PoolUpdateKind::Commit);
+
+        // the iterator is opened while only nonce 1 is pending
+        let mut best = pool.best_transactions();
+
+        // reorg to chain B, where nonce 0 is not mined, and put it back into the pool
+        let mut restored = FxHashMap::default();
+        restored.insert(sender_id, SenderInfo { state_nonce: 0, balance });
+        pool.on_canonical_state_change(block_info, vec![], restored, PoolUpdateKind::Reorg);
+        pool.add_transaction(v0, balance, 0, None).unwrap();
+
+        let first = best.next().expect("should yield a transaction");
+        let second = best.next().expect("should yield a transaction");
+
+        assert_eq!(first.id().nonce, 0, "expected nonce 0 first, got {}", first.id().nonce);
+        assert_eq!(second.id().nonce, 1, "expected nonce 1 second, got {}", second.id().nonce);
+        assert!(best.next().is_none());
+    }
+
+    /// Same as `best_transactions_nonce_order_on_reorg_reinsert`, but the reinserted nonce 0 pays
+    /// more than the transaction that was already yielded, so the iterator does not yield it.
+    /// Nonce 1 must not be yielded either, because its ancestor is pending again.
+    #[test]
+    fn best_transactions_no_nonce_gap_on_reorg_reinsert_above_last_yielded() {
+        let mut f = MockTransactionFactory::default();
+        let mut pool = TxPool::new(MockOrdering::default(), Default::default());
+
+        let sender = Address::random();
+        let other = Address::random();
+        let balance = U256::from(10_000_000);
+
+        let tx0 = MockTransaction::eip1559()
+            .with_sender(sender)
+            .with_gas_price(150)
+            .with_gas_limit(21_000);
+        let tx1 = tx0.next().with_gas_price(50);
+        let other_tx = MockTransaction::eip1559()
+            .with_sender(other)
+            .with_gas_price(100)
+            .with_gas_limit(21_000);
+
+        let v0 = f.validated(tx0);
+        let v1 = f.validated(tx1);
+        let v_other = f.validated(other_tx);
+        let hash0 = *v0.hash();
+        let sender_id = f.ids.sender_id(&sender).unwrap();
+
+        pool.add_transaction(v0.clone(), balance, 0, None).unwrap();
+        pool.add_transaction(v1, balance, 0, None).unwrap();
+        pool.add_transaction(v_other, balance, 0, None).unwrap();
+
+        let mut block_info = pool.block_info();
+        block_info.pending_basefee = 0;
+
+        // chain A mines nonce 0
+        let mut mined = FxHashMap::default();
+        mined.insert(sender_id, SenderInfo { state_nonce: 1, balance });
+        pool.on_canonical_state_change(block_info, vec![hash0], mined, PoolUpdateKind::Commit);
+
+        // the iterator is opened while nonce 1 and the other sender's transaction are pending
+        let mut best = pool.best_transactions();
+        let first = best.next().expect("should yield the other sender's transaction");
+        assert_eq!(first.sender(), other);
+
+        // reorg to chain B, where nonce 0 is not mined, and put it back into the pool
+        let mut restored = FxHashMap::default();
+        restored.insert(sender_id, SenderInfo { state_nonce: 0, balance });
+        pool.on_canonical_state_change(block_info, vec![], restored, PoolUpdateKind::Reorg);
+        pool.add_transaction(v0, balance, 0, None).unwrap();
+
+        // nonce 0 pays more than the transaction yielded above, so it is not yielded and nonce 1
+        // must not be yielded without it
+        assert!(best.next().is_none());
+    }
 }
