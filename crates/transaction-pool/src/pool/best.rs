@@ -117,6 +117,12 @@ pub struct BestTransactions<T: TransactionOrdering> {
     pub(crate) skip_blobs: bool,
     /// Whether live updates can be yielded after a lower-priority transaction.
     pub(crate) allow_updates_out_of_order: bool,
+    /// Whether a live update gave a transaction that is already tracked a new ancestor.
+    ///
+    /// This happens if the ancestor was mined when this iterator was created and a reorg puts it
+    /// back into the pool. The transaction can then still be in `independent`, so its ancestor has
+    /// to be checked before it is yielded.
+    pub(crate) ancestor_added_late: bool,
 }
 
 impl<T: TransactionOrdering> BestTransactions<T> {
@@ -172,9 +178,22 @@ impl<T: TransactionOrdering> BestTransactions<T> {
     /// Removes the currently best independent transaction from the independent set and the total
     /// set.
     fn pop_best(&mut self) -> Option<PendingTransaction<T>> {
-        self.independent.pop_last().inspect(|best| {
+        while let Some(best) = self.independent.pop_last() {
+            // A transaction that got an ancestor after it became independent is not executable
+            // yet. It stays in `all` and is unlocked again once the ancestor is yielded.
+            if self.ancestor_added_late && self.ancestor(best.transaction.id()).is_some() {
+                continue
+            }
             self.all.remove(best.transaction.id());
-        })
+            return Some(best)
+        }
+        None
+    }
+
+    /// Records if the given new transaction is the ancestor of a transaction that is already
+    /// tracked.
+    fn track_late_ancestor(&mut self, tx: &PendingTransaction<T>) {
+        self.ancestor_added_late |= self.all.contains_key(&tx.unlocks());
     }
 
     /// Checks for new transactions that have come into the `PendingPool` after this iterator was
@@ -187,6 +206,7 @@ impl<T: TransactionOrdering> BestTransactions<T> {
                 match pending_tx {
                     IncomingTransaction::Process(tx) => {
                         let tx_id = *tx.transaction.id();
+                        self.track_late_ancestor(&tx);
                         if self.ancestor(&tx_id).is_none() {
                             self.independent.insert(tx.clone());
                         }
@@ -194,6 +214,7 @@ impl<T: TransactionOrdering> BestTransactions<T> {
                     }
                     IncomingTransaction::Stash(tx) => {
                         let tx_id = *tx.transaction.id();
+                        self.track_late_ancestor(&tx);
                         self.all.insert(tx_id, tx);
                     }
                 }

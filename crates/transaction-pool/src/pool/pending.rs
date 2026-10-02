@@ -110,6 +110,7 @@ impl<T: TransactionOrdering> PendingPool<T> {
             last_priority: None,
             skip_blobs: false,
             allow_updates_out_of_order: false,
+            ancestor_added_late: false,
         }
     }
 
