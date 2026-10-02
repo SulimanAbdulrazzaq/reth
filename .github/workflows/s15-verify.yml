@@ -1,0 +1,50 @@
+name: s15-verify
+on: push
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      RUST_BACKTRACE: "1"
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 5
+      - name: tree under test
+        run: |
+          git log -3 --format='%H %T %s'
+          git status --short
+      - run: .github/scripts/install_llvm.sh ubuntu
+      - uses: dtolnay/rust-toolchain@stable
+      - name: toolchain
+        run: rustc --version && cargo --version
+      - name: new test and sibling best_transactions tests (reth-transaction-pool lib)
+        run: cargo test -p reth-transaction-pool --locked --lib -- best_transactions --test-threads=1
+      - name: stability, new test x50
+        if: always()
+        run: |
+          fails=0
+          for i in $(seq 1 50); do
+            cargo test -p reth-transaction-pool --locked --lib -- --exact pool::txpool::tests::best_transactions_nonce_order_on_reorg_reinsert >/tmp/run.log 2>&1 || fails=$((fails+1))
+          done
+          echo "failures in 50 runs: $fails"
+          exit $([ "$fails" -eq 0 ] && echo 0 || echo 1)
+      - name: install nextest
+        if: always()
+        uses: taiki-e/install-action@nextest
+      - name: full crate, default features (cargo nextest run -p reth-transaction-pool)
+        if: always()
+        run: cargo nextest run -p reth-transaction-pool --locked --no-fail-fast
+      - name: full crate, all features (cargo test -p reth-transaction-pool --all-features)
+        if: always()
+        run: cargo test -p reth-transaction-pool --locked --all-features --no-fail-fast
+      - name: nightly toolchain with rustfmt and clippy
+        if: always()
+        run: rustup toolchain install nightly --profile minimal --component rustfmt --component clippy
+      - name: rustfmt (cargo +nightly fmt --all --check)
+        if: always()
+        run: cargo +nightly fmt --all --check
+      - name: clippy (reth-transaction-pool, all features, -D warnings)
+        if: always()
+        run: cargo +nightly clippy -p reth-transaction-pool --lib --tests --benches --all-features --locked -- -D warnings
